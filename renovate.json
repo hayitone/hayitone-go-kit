@@ -1,0 +1,24 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":semanticCommits"
+  ],
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Images pinned in the Makefile",
+      "managerFilePatterns": [
+        "/^Makefile$/"
+      ],
+      "matchStrings": [
+        "_IMAGE\\s*:=\\s*(?<depName>[a-z0-9./-]+):(?<currentValue>[a-z0-9.-]+)"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ]
+}

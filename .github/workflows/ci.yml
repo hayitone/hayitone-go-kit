@@ -1,0 +1,38 @@
+# Runs on every push and pull request. Releases are tags (v0.1.0, …) created by hand, only
+# from a green main. Renovate pins the actions below to commit SHAs.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: format, vet, tests, vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run make fmt"; exit 1; }
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy && git diff --exit-code go.mod go.sum || { echo "::error::run make deps and commit"; exit 1; }
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: known vulnerabilities in reachable code (govulncheck)
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go.mod
+          go-package: ./...
