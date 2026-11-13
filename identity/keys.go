@@ -37,8 +37,9 @@ func (s StaticKeys) Key(_ context.Context, kid string) (paseto.V4AsymmetricPubli
 }
 
 // RemoteKeys fetches auth's public keys and keeps them. A kid it doesn't know makes it
-// fetch again (that is how services follow a key rotation without restarting), at most
-// once per MinRefetch, so tokens with made-up kids can't make it hammer auth.
+// fetch again (that is how services follow a key rotation without restarting): at most
+// once per MinRefetch after a successful fetch, so tokens with made-up kids can't make it
+// hammer auth, and at most once per second after a failed one (auth may be restarting).
 type RemoteKeys struct {
 	url    string
 	client *http.Client
@@ -47,7 +48,7 @@ type RemoteKeys struct {
 
 	mu        sync.Mutex // one fetch at a time
 	keys      sync.Map   // kid -> paseto.V4AsymmetricPublicKey
-	lastFetch time.Time
+	nextFetch time.Time  // no fetch for an unknown kid before this
 	now       func() time.Time
 }
 
@@ -82,7 +83,7 @@ func (r *RemoteKeys) Key(ctx context.Context, kid string) (paseto.V4AsymmetricPu
 	if k, ok := r.keys.Load(kid); ok { // fetched while we waited
 		return k.(paseto.V4AsymmetricPublicKey), nil
 	}
-	if r.now().Sub(r.lastFetch) < r.MinRefetch {
+	if r.now().Before(r.nextFetch) {
 		return paseto.V4AsymmetricPublicKey{}, ErrUnknownKey
 	}
 	if err := r.fetchLocked(ctx); err != nil {
@@ -96,8 +97,13 @@ func (r *RemoteKeys) Key(ctx context.Context, kid string) (paseto.V4AsymmetricPu
 
 // fetchLocked replaces nothing: keys only accumulate, so a token signed with a key that
 // was just retired still verifies for the rest of its 60 seconds.
-func (r *RemoteKeys) fetchLocked(ctx context.Context) error {
-	r.lastFetch = r.now()
+func (r *RemoteKeys) fetchLocked(ctx context.Context) (err error) {
+	r.nextFetch = r.now().Add(time.Second)
+	defer func() {
+		if err == nil {
+			r.nextFetch = r.now().Add(r.MinRefetch)
+		}
+	}()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, nil)
 	if err != nil {
 		return err

@@ -117,6 +117,32 @@ func TestRemoteKeysFollowRotationButDontHammer(t *testing.T) {
 	}
 }
 
+// While auth is down (restarting with new keys), a failed fetch doesn't lock out the next
+// attempt for MinRefetch: only for a second.
+func TestRemoteKeysRetryAfterAFailedFetch(t *testing.T) {
+	iss := identitytest.New()
+	var up atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !up.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(iss.PublicKeySet())
+	}))
+	defer srv.Close()
+	keys := identity.KeysFromURL(srv.URL) // MinRefetch 10 s
+	v := identity.NewVerifier(keys)
+	tok := iss.Token(identity.Identity{})
+	if _, err := v.Verify(ctx, tok); err == nil {
+		t.Fatal("verified while auth was down")
+	}
+	up.Store(true)
+	time.Sleep(1100 * time.Millisecond)
+	if _, err := v.Verify(ctx, tok); err != nil {
+		t.Fatalf("still locked out after auth came back: %v", err)
+	}
+}
+
 func TestRemoteKeysReady(t *testing.T) {
 	down := identity.KeysFromURL("http://127.0.0.1:1/internal/v1/keys")
 	if err := down.Ready(ctx); err == nil {
