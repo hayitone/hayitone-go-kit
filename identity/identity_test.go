@@ -226,6 +226,67 @@ func TestRouterPolicies(t *testing.T) {
 	}
 }
 
+func TestDepartmentGrants(t *testing.T) {
+	const publish = "platform.content.titles.publish"
+	film := identity.Identity{Grants: []string{publish + "@film", publish + "@music", "staff"}}
+	everywhere := identity.Identity{Grants: []string{publish, "staff"}}
+	nobody := identity.Identity{Grants: []string{"staff", publish + "x@film"}}
+
+	for _, c := range []struct {
+		name string
+		id   identity.Identity
+		dept string
+		want bool
+	}{
+		{"its department", film, "film", true},
+		{"another of its departments", film, "music", true},
+		{"a department it doesn't hold", film, "comedy", false},
+		{"no department named", film, "", false},
+		{"whole account covers every department", everywhere, "comedy", true},
+		{"a look-alike grant isn't it", nobody, "film", false},
+	} {
+		if got := c.id.HasIn(publish, c.dept); got != c.want {
+			t.Errorf("%s: HasIn = %v", c.name, got)
+		}
+	}
+	if film.Has(publish) {
+		t.Error("a department grant isn't the whole-account grant")
+	}
+	if all, depts := film.Departments(publish); all || strings.Join(depts, ",") != "film,music" {
+		t.Errorf("Departments = %v %v", all, depts)
+	}
+	if all, _ := everywhere.Departments(publish); !all {
+		t.Error("whole account: everywhere")
+	}
+
+	iss := identitytest.New()
+	rt := identity.NewRouter(iss.Verifier(), quiet())
+	rt.Handle("POST /titles/{id}/publish", identity.GrantInAny(publish), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The handler knows the title's department; here every title is a Comedy one.
+		if !identity.Must(r.Context()).HasIn(publish, "comedy") {
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	for _, c := range []struct {
+		name   string
+		grants []string
+		status int
+	}{
+		{"none of it: refused by the policy", []string{"staff"}, 403},
+		{"film only: let in, refused by the handler", []string{publish + "@film"}, 403},
+		{"comedy: allowed", []string{publish + "@comedy"}, 200},
+		{"whole account: allowed", []string{publish}, 200},
+	} {
+		req := httptest.NewRequest("POST", "/titles/t1/publish", nil)
+		req.Header.Set(identity.Header, iss.Token(identity.Identity{UserID: uuid.New(), Grants: c.grants}))
+		rec := httptest.NewRecorder()
+		rt.ServeHTTP(rec, req)
+		if rec.Code != c.status {
+			t.Errorf("%s: %d", c.name, rec.Code)
+		}
+	}
+}
+
 func TestMustPanicsWithoutIdentity(t *testing.T) {
 	defer func() {
 		if recover() == nil {

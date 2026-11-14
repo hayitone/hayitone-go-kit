@@ -38,6 +38,27 @@ func create(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
+Some staff permissions are given for one department only and arrive as `key@department`
+(`platform.content.titles.publish@film`). Let anyone holding the permission in some
+department onto the route, then check the resource's own department:
+
+```go
+rt.HandleFunc("POST /v1/titles/{id}/publish",
+    identity.GrantInAny("platform.content.titles.publish"), publish)
+
+func publish(w http.ResponseWriter, r *http.Request) {
+    me := identity.Must(r.Context())
+    title := load(r.PathValue("id"))
+    if !me.HasIn("platform.content.titles.publish", title.Department) { // whole account or that department
+        http.Error(w, "forbidden", http.StatusForbidden)
+        return
+    }
+    // …
+}
+```
+
+`me.Departments(key)` lists where a permission applies, e.g. to filter a list.
+
 The gateway's `docs/authz_contract.md` (section 5) is the contract this implements.
 
 ## Rules for this repo

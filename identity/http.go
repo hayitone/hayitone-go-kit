@@ -40,6 +40,11 @@ var SignedIn Policy = signedIn{}
 // second half (does this resource belong to that account?): only the handler can check it.
 func Grant(permission string) Policy { return grant(permission) }
 
+// GrantInAny: signed in, holding the permission for the whole account or for at least one
+// department. The route's handler then checks the resource's department with HasIn
+// (only it knows which department the resource belongs to).
+func GrantInAny(permission string) Policy { return grantInAny(permission) }
+
 // Recent: signed in (or reauthenticated) within maxAge, and if methods are given, with one
 // of them (e.g. MethodOTP, MethodPasskey for a second factor). Otherwise 401 with the
 // step-up challenge: the client reauthenticates (POST /v1/auth/reauth) and retries.
@@ -77,6 +82,19 @@ func (g grant) allow(id Identity, ok bool, _ time.Time) *refusal {
 	return nil
 }
 func (g grant) String() string { return "grant:" + string(g) }
+
+type grantInAny string
+
+func (g grantInAny) allow(id Identity, ok bool, _ time.Time) *refusal {
+	if !ok {
+		return notSignedIn()
+	}
+	if all, depts := id.Departments(string(g)); !all && len(depts) == 0 {
+		return &refusal{http.StatusForbidden, "forbidden", `Bearer realm="hayitone", error="insufficient_scope"`}
+	}
+	return nil
+}
+func (g grantInAny) String() string { return "grant-in-any:" + string(g) }
 
 type recent struct {
 	maxAge  time.Duration

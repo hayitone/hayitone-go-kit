@@ -16,6 +16,7 @@ package identity
 import (
 	"context"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,8 +57,33 @@ type Identity struct {
 	ExpiresAt time.Time
 }
 
-// Has reports whether the identity holds a grant.
+// Has reports whether the identity holds a grant for the whole account.
 func (i Identity) Has(grant string) bool { return slices.Contains(i.Grants, grant) }
+
+// Department grants: a role given per department reaches the token as "grant@department"
+// (e.g. "platform.content.titles.publish@film"; auth ADR 0014). Holding the plain grant
+// covers every department.
+
+// HasIn reports whether the identity holds a grant in a department: for the whole
+// account, or for that department.
+func (i Identity) HasIn(grant, department string) bool {
+	return i.Has(grant) || (department != "" && slices.Contains(i.Grants, grant+"@"+department))
+}
+
+// Departments says where the identity holds a grant: everywhere (whole account), or in
+// the listed departments (sorted; none means nowhere). For filtering lists.
+func (i Identity) Departments(grant string) (everywhere bool, departments []string) {
+	for _, g := range i.Grants {
+		if g == grant {
+			return true, nil
+		}
+		if d, ok := strings.CutPrefix(g, grant+"@"); ok && d != "" {
+			departments = append(departments, d)
+		}
+	}
+	slices.Sort(departments)
+	return false, departments
+}
 
 // Used reports whether they proved who they are with any of the methods.
 func (i Identity) Used(methods ...string) bool {
