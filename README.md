@@ -39,6 +39,11 @@ func create(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
+The keys follow auth by themselves: a new kid is fetched when a token first uses it, the
+set is looked at again every minute, and a key auth stops publishing (a finished rotation,
+or a leaked key removed) is refused within about two and a half minutes (90 seconds of grace for tokens it already
+signed). No restart is needed for either.
+
 Some staff permissions are given for one department only and arrive as `key@department`
 (`platform.content.titles.publish@film`). Let anyone holding the permission in some
 department onto the route, then check the resource's own department:

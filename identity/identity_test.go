@@ -117,6 +117,61 @@ func TestRemoteKeysFollowRotationButDontHammer(t *testing.T) {
 	}
 }
 
+// A key auth stops publishing (a finished rotation, or a leaked key removed) stops being
+// trusted: services look again every MaxAge, and accept a withdrawn key only for
+// RetiredGrace (its tokens' last seconds). Without that, a leaked identity key would be
+// trusted until every service restarted.
+func TestRemoteKeysDropWithdrawnKeys(t *testing.T) {
+	leaked, fresh := identitytest.New(), identitytest.New()
+	fresh.KID = "fresh"
+	var served atomic.Value
+	served.Store(leaked.PublicKeySet())
+	var fetches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		_ = json.NewEncoder(w).Encode(served.Load())
+	}))
+	defer srv.Close()
+
+	keys := identity.KeysFromURL(srv.URL)
+	keys.MinRefetch, keys.MaxAge, keys.RetiredGrace = 10*time.Millisecond, 50*time.Millisecond, 150*time.Millisecond
+	if err := keys.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	v := identity.NewVerifier(keys)
+	if _, err := v.Verify(ctx, leaked.Token(identity.Identity{})); err != nil {
+		t.Fatal(err)
+	}
+
+	// Auth now publishes only the fresh key. No unknown kid arrives; the next use after
+	// MaxAge looks again anyway, and the withdrawn key still works during its grace.
+	served.Store(fresh.PublicKeySet())
+	time.Sleep(60 * time.Millisecond)
+	if _, err := v.Verify(ctx, leaked.Token(identity.Identity{})); err != nil {
+		t.Fatalf("a just-withdrawn key, within its grace: %v", err)
+	}
+	if fetches.Load() < 2 {
+		t.Fatal("no fetch after MaxAge")
+	}
+	if _, err := v.Verify(ctx, fresh.Token(identity.Identity{})); err != nil {
+		t.Fatalf("the published key: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if _, err := v.Verify(ctx, leaked.Token(identity.Identity{})); err == nil {
+		t.Fatal("a withdrawn key is still trusted after its grace")
+	}
+	if _, err := v.Verify(ctx, fresh.Token(identity.Identity{})); err != nil {
+		t.Fatalf("the published key afterwards: %v", err)
+	}
+
+	// While auth can't be reached, the keys it last published stay in use.
+	srv.Close()
+	time.Sleep(60 * time.Millisecond)
+	if _, err := v.Verify(ctx, fresh.Token(identity.Identity{})); err != nil {
+		t.Fatalf("auth unreachable: the last published key must still work: %v", err)
+	}
+}
+
 // While auth is down (restarting with new keys), a failed fetch doesn't lock out the next
 // attempt for MinRefetch: only for a second.
 func TestRemoteKeysRetryAfterAFailedFetch(t *testing.T) {
