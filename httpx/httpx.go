@@ -91,6 +91,11 @@ type Options struct {
 	// the prefix, which may end in "/", and arrive on every signed-in request (the handler
 	// logs refusals itself; the gateway logs every request).
 	Passthrough []string
+
+	// Observe, if set, is called once per request after it is answered (probes excluded),
+	// with the request as the mux saw it (r.Pattern is the matched route). The metrics
+	// package's Registry.Observe uses it to count requests and time them.
+	Observe func(r *http.Request, status int, took time.Duration)
 }
 
 func (o Options) passthrough(p string) bool {
@@ -117,8 +122,14 @@ func MiddlewareWith(log *slog.Logger, next http.Handler, o Options) http.Handler
 				log.ErrorContext(ctx, "panic", "request_id", rid, "panic", p, "stack", string(debug.Stack()))
 				WriteError(rec, http.StatusInternalServerError, "internal", "")
 			}
-			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || pass {
-				return // probes every few seconds, gateway checks on every request: not logged
+			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+				return // probes every few seconds: neither logged nor counted
+			}
+			if o.Observe != nil {
+				o.Observe(req, rec.status, time.Since(start))
+			}
+			if pass || r.URL.Path == "/metrics" {
+				return // gateway checks on every request, scrapes every few seconds: counted, not logged
 			}
 			log.InfoContext(ctx, "request",
 				"request_id", rid,

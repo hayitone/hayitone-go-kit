@@ -14,6 +14,7 @@ go get github.com/hayitone/hayitone-go-kit@latest
 | `health` | `/healthz` and `/readyz` the gateway's health checks understand, and draining on shutdown |
 | `server` | `server.New` (sane timeouts) and `server.Run`: serve, then on SIGTERM drain, wait, and stop gracefully |
 | `logx` | JSON logs tagged with service and environment |
+| `metrics` | Prometheus metrics on a registry of the service's own: requests and timing per route pattern (via `httpx.Options.Observe`), Go runtime, process, build info; `/metrics` handler for the internal port |
 | `postgres`, `redisx` | Open a connection; `postgres.InTx`, `NotFound`, constraint-error helpers |
 | `identity` | Verify the gateway's identity token with auth's public keys; a router where **every route declares who may call it**; step-up (recent sign-in, second factor) |
 | `identity/identitytest` | Make identity tokens in a service's own tests |
@@ -76,3 +77,22 @@ The gateway's `docs/authz_contract.md` (section 5) is the contract this implemen
 
 Everything runs in containers: `make check` (format, vet, race tests), `make vuln`,
 `make deps` after changing imports.
+
+## Metrics in a service
+
+```go
+reg := metrics.New("catalog", version)
+public := httpx.MiddlewareWith(log, publicMux, httpx.Options{Observe: reg.Observe("public")})
+internalMux.Handle("GET /metrics", reg.Handler()) // internal port only, never through the gateway
+
+uploads := prometheus.NewCounterVec(prometheus.CounterOpts{
+    Name: "catalog_uploads_total", Help: "Uploads finished, by result.",
+}, []string{"result"}) // a small, fixed set of values
+reg.MustRegister(uploads)
+```
+
+Every service gets `http_requests_total{server,method,route,code}`,
+`http_request_duration_seconds{server,method,route}`, `go_*`, `process_*` and
+`hayitone_build_info{service,version,go_version}`. The route is the mux pattern
+(`/v1/videos/{id}`), never the URL. Labels must stay a small, fixed set: never an ID, a
+person, an email or a token.
