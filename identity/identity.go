@@ -4,7 +4,10 @@
 //   - The gateway asks auth "who is calling?" and forwards the answer as a short-lived signed
 //     token in X-Hayitone-Identity (PASETO v4.public, 60 s, signed by auth).
 //   - The service verifies it with auth's PUBLIC keys (Verifier, KeysFromURL) and reads who
-//     the caller is only from the verified claims. The plain X-Hayitone-*-Id headers are for
+//     the caller is only from the verified claims.
+//   - Each token is for ONE request: auth signs a fresh one per request, naming its method
+//     and path, and the service refuses it for any other (VerifyRequest). A token taken from
+//     one service, or from one request, can't be replayed on another. The plain X-Hayitone-*-Id headers are for
 //     logs; nothing in a request body ever says who is acting.
 //   - Every route declares who may call it (Router + Policy): there is no route without a
 //     decision, so forgetting one is a compile error, not a hole.
@@ -22,7 +25,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// Header carries the identity token from the gateway (and between services).
+// Header carries the identity token from the gateway. It is never forwarded to another
+// service: it is valid only for the request it came with.
 const Header = "X-Hayitone-Identity"
 
 // The contract's fixed values.
@@ -53,6 +57,8 @@ type Identity struct {
 	AuthTime  time.Time // last sign-in or reauthentication; refresh doesn't move it
 	AMR       []string  // how they proved it: pwd, otp, hwk, rec
 	RequestID string    // the request's x-request-id (jti)
+	Method    string    // the request it was signed for: method ("PATCH")
+	Path      string    // ...and path, escaped, no query ("/v1/me/profile"); see RequestPath
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 }

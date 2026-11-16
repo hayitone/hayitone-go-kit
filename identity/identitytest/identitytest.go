@@ -3,11 +3,12 @@
 //
 //	issuer := identitytest.New()
 //	router := identity.NewRouter(issuer.Verifier(), log)
-//	req.Header.Set(identity.Header, issuer.Token(identity.Identity{UserID: u, Grants: []string{"catalog.publish"}}))
+//	issuer.Authorize(req, identity.Identity{UserID: u, Grants: []string{"catalog.publish"}})
 package identitytest
 
 import (
 	"encoding/json"
+	"net/http"
 	"time"
 
 	"aidanwoods.dev/go-paseto"
@@ -41,8 +42,15 @@ func (i *Issuer) PublicKeySet() identity.KeySet {
 	return identity.KeySet{Keys: []identity.PublicKey{{KID: i.KID, Version: "v4", Purpose: "public", PublicKeyHex: i.secret.Public().ExportHex()}}}
 }
 
+// Authorize signs id for req, as auth does (bound to req's method and path), and puts it
+// in req's identity header.
+func (i *Issuer) Authorize(req *http.Request, id identity.Identity) {
+	id.Method, id.Path = req.Method, identity.RequestPath(req)
+	req.Header.Set(identity.Header, i.Token(id))
+}
+
 // Token signs id. Zero fields get defaults: random IDs, signed in now with a password,
-// valid for 60 s.
+// valid for 60 s, for "GET /" (set Method and Path, or use Authorize, for a real request).
 func (i *Issuer) Token(id identity.Identity) string {
 	now := i.Now().UTC().Truncate(time.Second)
 	if id.UserID == uuid.Nil {
@@ -66,6 +74,12 @@ func (i *Issuer) Token(id identity.Identity) string {
 	if id.RequestID == "" {
 		id.RequestID = uuid.NewString()
 	}
+	if id.Method == "" {
+		id.Method = http.MethodGet
+	}
+	if id.Path == "" {
+		id.Path = "/"
+	}
 	iat, exp := now, now.Add(60*time.Second)
 	if !id.IssuedAt.IsZero() {
 		iat = id.IssuedAt
@@ -83,6 +97,8 @@ func (i *Issuer) Token(id identity.Identity) string {
 	_ = t.Set("amr", id.AMR)
 	t.SetString("auth_time", id.AuthTime.UTC().Format(time.RFC3339))
 	t.SetJti(id.RequestID)
+	t.SetString("method", id.Method)
+	t.SetString("path", id.Path)
 	t.SetIssuedAt(iat)
 	t.SetNotBefore(iat)
 	t.SetExpiration(exp)

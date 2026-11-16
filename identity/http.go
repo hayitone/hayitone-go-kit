@@ -193,9 +193,9 @@ func (rt *Router) Guard(p Policy, h http.Handler) http.Handler {
 			id Identity
 			ok bool
 		)
-		if raw := r.Header.Get(Header); raw != "" {
+		if r.Header.Get(Header) != "" {
 			var err error
-			id, err = rt.v.Verify(r.Context(), raw)
+			id, err = rt.v.VerifyRequest(r)
 			if err != nil {
 				rt.log.WarnContext(r.Context(), "identity refused", "reason", err.Error(),
 					"request_id", httpx.RequestID(r.Context()), "route", r.Pattern)

@@ -65,6 +65,21 @@ func publish(w http.ResponseWriter, r *http.Request) {
 
 `me.Departments(key)` lists where a permission applies, e.g. to filter a list.
 
+**Each token is for one request.** Auth signs a fresh identity token for every request,
+naming its method and escaped path (`PATCH /v1/me/profile`; the query doesn't count). The
+router refuses it for any other request (`identity.ErrOtherRequest`, answered as 401), so a
+token taken from one service, or from one request, can't be replayed on another. Never
+forward the identity header to another service: calls between services get their own
+credentials. Outside the router, use `verifier.VerifyRequest(r)`, never `Verify` alone.
+Since v0.4.0; tokens from an older auth (without the request) are refused.
+
+In tests, sign for the request you send:
+
+```go
+req := httptest.NewRequest("PATCH", "/v1/me/profile", body)
+issuer.Authorize(req, identity.Identity{UserID: u}) // sets X-Hayitone-Identity for this request
+```
+
 The gateway's `docs/authz_contract.md` (section 5) is the contract this implements.
 
 ## Rules for this repo

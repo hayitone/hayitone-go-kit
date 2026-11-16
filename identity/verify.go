@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -14,11 +15,29 @@ import (
 
 // Refusal reasons. They are for the service's logs; callers only ever see "unauthorized".
 var (
-	ErrMissing    = errors.New("identity: no token")
-	ErrMalformed  = errors.New("identity: malformed token")
-	ErrUnknownKey = errors.New("identity: unknown key id")
-	ErrInvalid    = errors.New("identity: signature or claims invalid")
+	ErrMissing      = errors.New("identity: no token")
+	ErrMalformed    = errors.New("identity: malformed token")
+	ErrUnknownKey   = errors.New("identity: unknown key id")
+	ErrInvalid      = errors.New("identity: signature or claims invalid")
+	ErrOtherRequest = errors.New("identity: token is for another request")
 )
+
+// RequestPath is the path a token is bound to: the request's escaped path, without the
+// query. Auth and the services both use this, so the two always agree.
+func RequestPath(r *http.Request) string { return r.URL.EscapedPath() }
+
+// VerifyRequest verifies the token in r's identity header (Verify) and that it was signed
+// for this very request: same method, same path. Anything else is ErrOtherRequest.
+func (v *Verifier) VerifyRequest(r *http.Request) (Identity, error) {
+	id, err := v.Verify(r.Context(), r.Header.Get(Header))
+	if err != nil {
+		return Identity{}, err
+	}
+	if id.Method != r.Method || id.Path != RequestPath(r) {
+		return Identity{}, ErrOtherRequest
+	}
+	return id, nil
+}
 
 // Keys finds auth's public key for a kid (see KeysFromURL, StaticKeys).
 type Keys interface {
@@ -38,7 +57,8 @@ func (v *Verifier) SetClock(now func() time.Time) { v.now = now }
 
 // Verify checks the signature with the key named by the footer's kid, the issuer, the
 // audience and the times (expired at exp, no leeway), and reads the claims. Any failure is
-// one of the errors above.
+// one of the errors above. It does NOT check which request the token is for: services use
+// VerifyRequest (the Router does).
 func (v *Verifier) Verify(ctx context.Context, raw string) (Identity, error) {
 	if raw == "" {
 		return Identity{}, ErrMissing
@@ -78,6 +98,13 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Identity, error) {
 	errs = append(errs, err)
 	id.RequestID, err = tok.GetJti()
 	errs = append(errs, err)
+	id.Method, err = tok.GetString("method")
+	errs = append(errs, err)
+	id.Path, err = tok.GetString("path")
+	errs = append(errs, err)
+	if id.Method == "" || !strings.HasPrefix(id.Path, "/") {
+		errs = append(errs, errors.New("no request"))
+	}
 	id.IssuedAt, err = tok.GetIssuedAt()
 	errs = append(errs, err)
 	id.ExpiresAt, err = tok.GetExpiration()

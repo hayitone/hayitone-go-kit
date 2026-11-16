@@ -27,14 +27,60 @@ func TestVerifyReadsTheClaims(t *testing.T) {
 	iss := identitytest.New()
 	want := identity.Identity{UserID: uuid.New(), AccountID: uuid.New(), SessionID: uuid.New(),
 		Grants: []string{"catalog.publish"}, AMR: []string{"otp", "pwd"}, RequestID: "req-1",
-		AuthTime: time.Now().Add(-time.Minute).Truncate(time.Second)}
+		AuthTime: time.Now().Add(-time.Minute).Truncate(time.Second), Method: "PATCH", Path: "/v1/me/profile"}
 	got, err := iss.Verifier().Verify(ctx, iss.Token(want))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.UserID != want.UserID || got.AccountID != want.AccountID || got.SessionID != want.SessionID ||
-		!got.Has("catalog.publish") || !got.Used(identity.MethodOTP) || got.RequestID != "req-1" || !got.AuthTime.Equal(want.AuthTime) {
+		!got.Has("catalog.publish") || !got.Used(identity.MethodOTP) || got.RequestID != "req-1" || !got.AuthTime.Equal(want.AuthTime) ||
+		got.Method != "PATCH" || got.Path != "/v1/me/profile" {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// A token is for one request: same method, same escaped path (the query doesn't count).
+func TestVerifyRequest(t *testing.T) {
+	iss := identitytest.New()
+	v := iss.Verifier()
+	signed := httptest.NewRequest("PATCH", "/v1/me/profile?x=1", nil)
+	iss.Authorize(signed, identity.Identity{})
+	tok := signed.Header.Get(identity.Header)
+	for _, c := range []struct {
+		name, method, target string
+		want                 error
+	}{
+		{"the same request", "PATCH", "/v1/me/profile", nil},
+		{"another query", "PATCH", "/v1/me/profile?y=2", nil},
+		{"another method", "DELETE", "/v1/me/profile", identity.ErrOtherRequest},
+		{"another path", "PATCH", "/v1/me/profile/avatar", identity.ErrOtherRequest},
+		{"another service's path", "PATCH", "/v1/catalog/titles/1", identity.ErrOtherRequest},
+		{"trailing slash", "PATCH", "/v1/me/profile/", identity.ErrOtherRequest},
+	} {
+		req := httptest.NewRequest(c.method, c.target, nil)
+		req.Header.Set(identity.Header, tok)
+		if _, err := v.VerifyRequest(req); !errors.Is(err, c.want) {
+			t.Errorf("%s: %v, want %v", c.name, err, c.want)
+		}
+	}
+	// Escaped paths are compared escaped: %2F is not a slash.
+	enc := httptest.NewRequest("GET", "/v1/titles/a%2Fb", nil)
+	iss.Authorize(enc, identity.Identity{})
+	if _, err := v.VerifyRequest(enc); err != nil {
+		t.Errorf("escaped path: %v", err)
+	}
+	plain := httptest.NewRequest("GET", "/v1/titles/a/b", nil)
+	plain.Header.Set(identity.Header, enc.Header.Get(identity.Header))
+	if _, err := v.VerifyRequest(plain); !errors.Is(err, identity.ErrOtherRequest) {
+		t.Errorf("escaped vs plain: %v", err)
+	}
+	// A token naming no request at all is refused outright.
+	if _, err := v.Verify(ctx, iss.Token(identity.Identity{Path: "nowhere"})); !errors.Is(err, identity.ErrInvalid) {
+		t.Errorf("no path: %v", err)
+	}
+	none := httptest.NewRequest("GET", "/v1/me", nil)
+	if _, err := v.VerifyRequest(none); !errors.Is(err, identity.ErrMissing) {
+		t.Errorf("no token: %v", err)
 	}
 }
 
@@ -229,12 +275,16 @@ func TestRouterPolicies(t *testing.T) {
 	rt.Handle("DELETE /channel", identity.All(identity.Grant("channel.delete"), identity.Recent(15*time.Minute, identity.MethodOTP, identity.MethodPasskey)), ok)
 	rt.Handle("POST /settings", identity.Recent(15*time.Minute), ok)
 
+	// Each token is signed for the request it is sent with, as auth does; "bad" is a
+	// tampered one, and "elsewhere" one signed for another request (method and path).
 	user := uuid.New()
-	fresh := iss.Token(identity.Identity{UserID: user})
-	publisher := iss.Token(identity.Identity{UserID: user, Grants: []string{"catalog.publish", "channel.delete"}})
-	stale := iss.Token(identity.Identity{UserID: user, Grants: []string{"channel.delete"}, AuthTime: time.Now().Add(-time.Hour)})
-	withOTP := iss.Token(identity.Identity{UserID: user, Grants: []string{"channel.delete"}, AMR: []string{"otp", "pwd"}})
-	bad := fresh[:20] + flip(fresh[20]) + fresh[21:]
+	ids := map[string]identity.Identity{
+		"fresh":     {UserID: user},
+		"publisher": {UserID: user, Grants: []string{"catalog.publish", "channel.delete"}},
+		"stale":     {UserID: user, Grants: []string{"channel.delete"}, AuthTime: time.Now().Add(-time.Hour)},
+		"withOTP":   {UserID: user, Grants: []string{"channel.delete"}, AMR: []string{"otp", "pwd"}},
+	}
+	const fresh, publisher, stale, withOTP, bad = "fresh", "publisher", "stale", "withOTP", "bad"
 
 	for _, c := range []struct {
 		name, method, path, token string
@@ -254,10 +304,21 @@ func TestRouterPolicies(t *testing.T) {
 		{"second factor needed, password only", "DELETE", "/channel", publisher, 401, "second_factor_reauthentication_required", "", `acr_values="otp hwk"`},
 		{"second factor used", "DELETE", "/channel", withOTP, 200, "", user.String(), ""},
 		{"no route", "GET", "/nothing", fresh, 404, "not_found", "", ""},
+		{"token for another path", "GET", "/me", "elsewhere:GET /videos", 401, "unauthorized", "", ""},
+		{"token for another method", "POST", "/videos/v1/publish", "elsewhere:GET /videos/v1/publish", 401, "unauthorized", "", ""},
+		{"anonymous route, token for another request: anonymous", "GET", "/videos", "elsewhere:GET /me", 200, "", "anonymous", ""},
 	} {
 		req := httptest.NewRequest(c.method, c.path, nil)
-		if c.token != "" {
-			req.Header.Set(identity.Header, c.token)
+		switch method, path, other := strings.Cut(strings.TrimPrefix(c.token, "elsewhere:"), " "); {
+		case c.token == "":
+		case c.token == bad:
+			iss.Authorize(req, ids[fresh])
+			tok := req.Header.Get(identity.Header)
+			req.Header.Set(identity.Header, tok[:20]+flip(tok[20])+tok[21:])
+		case other:
+			req.Header.Set(identity.Header, iss.Token(identity.Identity{UserID: user, Grants: ids[publisher].Grants, Method: method, Path: path}))
+		default:
+			iss.Authorize(req, ids[c.token])
 		}
 		rec := httptest.NewRecorder()
 		rt.ServeHTTP(rec, req)
@@ -333,7 +394,7 @@ func TestDepartmentGrants(t *testing.T) {
 		{"whole account: allowed", []string{publish}, 200},
 	} {
 		req := httptest.NewRequest("POST", "/titles/t1/publish", nil)
-		req.Header.Set(identity.Header, iss.Token(identity.Identity{UserID: uuid.New(), Grants: c.grants}))
+		iss.Authorize(req, identity.Identity{UserID: uuid.New(), Grants: c.grants})
 		rec := httptest.NewRecorder()
 		rt.ServeHTTP(rec, req)
 		if rec.Code != c.status {
