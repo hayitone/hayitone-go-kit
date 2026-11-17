@@ -18,6 +18,8 @@ go get github.com/hayitone/hayitone-go-kit@latest
 | `postgres`, `redisx` | Open a connection; `postgres.InTx`, `NotFound`, constraint-error helpers |
 | `identity` | Verify the gateway's identity token with auth's public keys; a router where **every route declares who may call it**; step-up (recent sign-in, second factor) |
 | `identity/identitytest` | Make identity tokens in a service's own tests |
+| `natsx` | Connect to NATS as the service's own user (NKey seed outside dev, TLS with a private CA), reconnecting for as long as the process lives; `Config.Check` for start-up validation |
+| `events` | Read another service's events from NATS JetStream: each one handled exactly once inside the service's own database transaction, in order, acknowledged after the commit, retried, and parked (never dropped) when it keeps failing |
 
 ## Identity in a service
 
@@ -95,8 +97,9 @@ The gateway's `docs/authz_contract.md` (section 5) is the contract this implemen
 
 ## Development
 
-Everything runs in containers: `make check` (format, vet, race tests), `make vuln`,
-`make deps` after changing imports.
+Everything runs in containers: `make check` (format, vet, race tests, and `make integration`:
+the events tests against throw-away NATS and Postgres containers), `make vuln`, `make deps`
+after changing imports.
 
 ## Metrics in a service
 
@@ -116,3 +119,38 @@ Every service gets `http_requests_total{server,method,route,code}`,
 `hayitone_build_info{service,version,go_version}`. The route is the mux pattern
 (`/v1/videos/{id}`), never the URL. Labels must stay a small, fixed set: never an ID, a
 person, an email or a token.
+
+## Events in a service
+
+```go
+nc, err := natsx.Connect(cfg.NATS, "hayitone-profile", log)
+c, err := events.New(nc, pool, events.Config{
+    Stream:   "AUTH",    // the producer's stream
+    Consumer: "profile", // durable name: this service
+    Handlers: map[string]events.Handler{
+        "auth.user.created": profiles.Create, // func(ctx, tx pgx.Tx, ev events.Event) error
+        "auth.user.erased":  profiles.Erase,
+    },
+    Logger: log, Registerer: reg,
+})
+go c.Run(ctx) // until ctx ends; rides out NATS and database outages
+```
+
+`c.Ready()` says whether it is reading (set up and connected) and `c.ParkedCount(ctx)` how
+many events wait in `events_parked`: export both as metrics and alert on them. Whether
+reading events belongs in `/readyz` is the service's call (profile leaves it out: its API
+works without NATS).
+
+- Copy `events/schema.sql` (also `events.Schema`) into one of the service's migrations:
+  `events_processed` (what was handled, kept 14 days) and `events_parked`.
+- A handler does all its work through the `tx` it's given. It commits together with the
+  record that the event was handled, so a redelivered event is skipped, never applied twice.
+- Return `events.Permanent(err)` for a payload that can never work: the event is parked at
+  once. Any other error is retried (1 s, 2 s, 4 s ... 1 min); after 8 attempts it is parked.
+  Parked events are logged at ERROR and counted in
+  `hayitone_events_handled_total{result="parked"}`; alert on `ParkedCount() > 0`. Fix the
+  cause, then `ReplayParked(ctx, eventID)`.
+- One event at a time per consumer, in the stream's order. Because a parked event doesn't
+  stop the ones after it, handlers must cope with an event whose earlier one was parked
+  (an update for a profile that doesn't exist yet).
+- Check payloads against the producer's schemas (auth: `docs/events/`) in your tests.

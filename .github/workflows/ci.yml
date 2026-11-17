@@ -31,6 +31,18 @@ jobs:
           go mod tidy && git diff --exit-code go.mod go.sum || { echo "::error::run make deps and commit"; exit 1; }
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # The events package against a real JetStream server and Postgres (the other tests skip
+      # without them).
+      - name: start NATS (JetStream) and Postgres
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2.15-alpine -js
+          docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=kit -e POSTGRES_DB=kit postgres:18
+          for i in $(seq 1 60); do docker exec pg pg_isready -h 127.0.0.1 -U postgres -q && break; sleep 1; done
+      - name: events tests (real NATS and Postgres)
+        env:
+          KIT_TEST_NATS_URL: nats://localhost:4222
+          KIT_TEST_DATABASE_URL: postgres://postgres:kit@localhost:5432/kit?sslmode=disable
+        run: go test -race -count=1 -v ./events/
       - name: known vulnerabilities in reachable code (govulncheck)
         uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
         with:
