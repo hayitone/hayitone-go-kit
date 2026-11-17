@@ -19,6 +19,7 @@ go get github.com/hayitone/hayitone-go-kit@latest
 | `identity` | Verify the gateway's identity token with auth's public keys; a router where **every route declares who may call it**; step-up (recent sign-in, second factor) |
 | `identity/identitytest` | Make identity tokens in a service's own tests |
 | `natsx` | Connect to NATS as the service's own user (NKey seed outside dev, TLS with a private CA), reconnecting for as long as the process lives; `Config.Check` for start-up validation |
+| `outbox` | Publish a service's own events: written in the same transaction as the change (`outbox.Write`), sent to the service's JetStream stream by a relay (one active, the others standing by), in order per key, retried, scrubbed and cleaned up |
 | `events` | Read another service's events from NATS JetStream: each one handled exactly once inside the service's own database transaction, in order, acknowledged after the commit, retried, and parked (never dropped) when it keeps failing |
 
 ## Identity in a service
@@ -98,7 +99,7 @@ The gateway's `docs/authz_contract.md` (section 5) is the contract this implemen
 ## Development
 
 Everything runs in containers: `make check` (format, vet, race tests, and `make integration`:
-the events tests against throw-away NATS and Postgres containers), `make vuln`, `make deps`
+the events and outbox tests against throw-away NATS and Postgres containers), `make vuln`, `make deps`
 after changing imports.
 
 ## Metrics in a service
@@ -154,3 +155,33 @@ works without NATS).
   stop the ones after it, handlers must cope with an event whose earlier one was parked
   (an update for a profile that doesn't exist yet).
 - Check payloads against the producer's schemas (auth: `docs/events/`) in your tests.
+
+## Publishing events (outbox)
+
+```go
+// In the change's own transaction: never sent if it rolls back, never lost if NATS is down.
+err := postgres.InTx(ctx, pool, func(tx pgx.Tx) error {
+    // … the change …
+    return outbox.Write(ctx, tx, "catalog.title.published", titleID.String(), payload)
+})
+
+// The relay, a process of its own (`catalog relay`): a slow broker never slows the API.
+nc, err := natsx.Connect(cfg.NATS, "hayitone-catalog-relay", log)
+pub, err := outbox.NewNATS(nc, outbox.Stream{Name: "CATALOG", Subject: "catalog.>"})
+go pub.EnsureStream(ctx, log) // then:
+relay := outbox.NewRelay(pool, pub, log, outbox.Config{LockName: "hayitone-catalog/outbox-relay"})
+reg.MustRegister(relay.Collectors()...)
+err = relay.Run(ctx)
+```
+
+- Copy `outbox/schema.sql` (also `outbox.Schema`) into one of the service's migrations.
+- The key orders events about one thing (a title's ID): one key's events go out in the order
+  they were written, and a refused one holds back only its own key's later events.
+- Each event carries `Hayitone-Event-Id` (its outbox ID, also the stream's duplicate check),
+  `Hayitone-Key`, `Hayitone-Created-At` and `Hayitone-Request-Id`: what package `events` reads.
+- `Config.Scrub` removes fields (a code, a token) from the stored row once delivered;
+  published rows are deleted after 7 days (the stream keeps them as long).
+- Metrics: `hayitone_outbox_published_total`, `…_publish_failures_total`,
+  `…_broker_unavailable_total`, `hayitone_outbox_pending`, `…_oldest_pending_seconds` and
+  `hayitone_outbox_relay_active`. Alert on the oldest pending event's age.
+- Auth's relay (`internal/platform/outbox`) is the original; it moves onto this package later.
