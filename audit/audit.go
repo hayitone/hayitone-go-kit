@@ -111,6 +111,10 @@ type Actor struct {
 	Type      string     `json:"type"`
 	AccountID *uuid.UUID `json:"account_id,omitempty"`
 	SessionID *uuid.UUID `json:"session_id,omitempty"`
+	// ActingFor is the account the person acted for, from the verified identity: a partner
+	// company for its people, Hayitone's own for staff. The audit log learns from it who
+	// belongs to a company (what that company's activity log may name); it isn't sealed.
+	ActingFor *uuid.UUID `json:"acting_for,omitempty"`
 	IP        string     `json:"ip,omitempty"`
 	UserAgent string     `json:"user_agent,omitempty"`
 }
@@ -269,7 +273,8 @@ func Capture(next http.Handler) http.Handler {
 	})
 }
 
-// ActorFrom is who is acting in ctx: the verified identity (person and session) and, if
+// ActorFrom is who is acting in ctx: the verified identity (person, session and the account
+// they act for) and, if
 // Capture ran, the client's IP and user agent; with no identity, the system.
 func ActorFrom(ctx context.Context) Actor {
 	id, ok := identity.From(ctx)
@@ -280,6 +285,10 @@ func ActorFrom(ctx context.Context) Actor {
 	if id.SessionID != uuid.Nil {
 		s := id.SessionID
 		a.SessionID = &s
+	}
+	if id.AccountID != uuid.Nil {
+		f := id.AccountID
+		a.ActingFor = &f
 	}
 	if c, ok := ctx.Value(ctxKey{}).(client); ok {
 		if c.ip.IsValid() {

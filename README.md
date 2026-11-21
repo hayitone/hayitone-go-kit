@@ -210,8 +210,9 @@ err := postgres.InTx(ctx, pool, func(tx pgx.Tx) error {
 - The entry is an event on `<service>.audit.recorded` (`audit.Topic`), published by the
   service's own relay to its own stream; audit reads it with its own consumer and labels it
   with that stream's service.
-- Who acted comes from the verified identity (person and session); with none (a scheduled
-  job, an event handler) the actor is `system`. Nothing in a request body says who acted.
+- Who acted comes from the verified identity (person, session, and the account they acted
+  for: audit learns from it who belongs to a partner company); with none (a scheduled job, an
+  event handler) the actor is `system`. Nothing in a request body says who acted.
 - Entries are sealed for good: IDs only, never an email, phone number, name, code, token or
   key. `Write` refuses fields whose names say they hold one (`audit.ForbiddenKey`), and any
   entry the audit log would refuse (an action that isn't `noun.verb`, too much data), so

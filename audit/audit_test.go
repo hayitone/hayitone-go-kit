@@ -67,7 +67,7 @@ func TestWriteAsPerson(t *testing.T) {
 	if rec.Action != "title.approved" || rec.Outcome != OutcomeSuccess || rec.Reason != "fine" {
 		t.Fatalf("%+v", rec)
 	}
-	if rec.Actor.Type != ActorAccount || *rec.Actor.AccountID != user || *rec.Actor.SessionID != session {
+	if rec.Actor.Type != ActorAccount || *rec.Actor.AccountID != user || *rec.Actor.SessionID != session || *rec.Actor.ActingFor != partner {
 		t.Fatalf("actor %+v", rec.Actor)
 	}
 	if rec.Actor.IP != "41.210.1.2" || rec.Actor.UserAgent != "Mozilla/5.0" {
@@ -106,7 +106,7 @@ func TestNoIPWithoutCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Actor.IP != "" || rec.Actor.UserAgent != "" || rec.Actor.SessionID != nil {
+	if rec.Actor.IP != "" || rec.Actor.UserAgent != "" || rec.Actor.SessionID != nil || rec.Actor.ActingFor != nil {
 		t.Fatalf("%+v", rec.Actor)
 	}
 }
