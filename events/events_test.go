@@ -355,3 +355,21 @@ func TestConfig(t *testing.T) {
 		t.Error("Schema not embedded")
 	}
 }
+
+// Two consumers in one service (two streams) share hayitone_events_handled_total.
+func TestTwoConsumersShareTheCounter(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	a, err := New(nil, nil, Config{Stream: "AUTH", Consumer: "audit", Handlers: map[string]Handler{"auth.one": record}, Registerer: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(nil, nil, Config{Stream: "CATALOG", Consumer: "audit", Handlers: map[string]Handler{"catalog.two": record}, Registerer: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.count("auth.one", "ok")
+	b.count("catalog.two", "ok")
+	if handled(reg, "one", "ok") != 1 || handled(reg, "two", "ok") != 1 {
+		t.Fatal("both consumers' counts should be on the one registered counter")
+	}
+}

@@ -150,7 +150,17 @@ func New(nc *nats.Conn, pool *pgxpool.Pool, cfg Config) (*Consumer, error) {
 	}
 	if cfg.Registerer != nil {
 		if err := cfg.Registerer.Register(c.handled); err != nil {
-			return nil, err
+			// A second consumer in the same service (another stream) shares the counter:
+			// its topics are its own labels.
+			are, ok := err.(prometheus.AlreadyRegisteredError)
+			if !ok {
+				return nil, err
+			}
+			existing, ok := are.ExistingCollector.(*prometheus.CounterVec)
+			if !ok {
+				return nil, err
+			}
+			c.handled = existing
 		}
 	}
 	return c, nil

@@ -21,6 +21,7 @@ go get github.com/hayitone/hayitone-go-kit@latest
 | `natsx` | Connect to NATS as the service's own user (NKey seed outside dev, TLS with a private CA), reconnecting for as long as the process lives; `Config.Check` for start-up validation |
 | `outbox` | Publish a service's own events: written in the same transaction as the change (`outbox.Write`), sent to the service's JetStream stream by a relay (one active, the others standing by), in order per key, retried, scrubbed and cleaned up |
 | `events` | Read another service's events from NATS JetStream: each one handled exactly once inside the service's own database transaction, in order, acknowledged after the commit, retried, and parked (never dropped) when it keeps failing |
+| `audit` | Record what staff and partners did for the audit log: `audit.Write` puts an entry into the service's outbox in the change's own transaction, the actor taken from the verified identity and the gateway's headers (`audit.Capture`), never from the request |
 
 ## Identity in a service
 
@@ -185,3 +186,35 @@ err = relay.Run(ctx)
   `…_broker_unavailable_total`, `hayitone_outbox_pending`, `…_oldest_pending_seconds` and
   `hayitone_outbox_relay_active`. Alert on the oldest pending event's age.
 - Auth's relay (`internal/platform/outbox`) is the original; it moves onto this package later.
+
+## Audit entries
+
+What staff and partners do (approve a title, change a price, record a refund) goes to the
+audit log (hayitone-audit), written in the same transaction as the change:
+
+```go
+public := audit.Capture(router) // keeps the client's IP and user agent for Write
+
+err := postgres.InTx(ctx, pool, func(tx pgx.Tx) error {
+    // … the change …
+    return audit.Write(ctx, tx, "catalog", audit.Entry{
+        Action:  "title.approved",
+        Target:  audit.Target{Type: "title", ID: title.ID.String()},
+        Tenant:  title.PartnerID, // the partner's activity log; uuid.Nil for Hayitone's own
+        Reason:  req.Note,
+        Changes: map[string]audit.Change{"status": {From: "submitted", To: "approved"}},
+    })
+})
+```
+
+- The entry is an event on `<service>.audit.recorded` (`audit.Topic`), published by the
+  service's own relay to its own stream; audit reads it with its own consumer and labels it
+  with that stream's service.
+- Who acted comes from the verified identity (person and session); with none (a scheduled
+  job, an event handler) the actor is `system`. Nothing in a request body says who acted.
+- Entries are sealed for good: IDs only, never an email, phone number, name, code, token or
+  key. `Write` refuses fields whose names say they hold one (`audit.ForbiddenKey`), and any
+  entry the audit log would refuse (an action that isn't `noun.verb`, too much data), so
+  the mistake shows in the service's own tests.
+- Test with `audit.Build` (the record `Write` would publish) or by reading the
+  `outbox_events` row.
